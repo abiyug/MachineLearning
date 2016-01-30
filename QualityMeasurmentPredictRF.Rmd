@@ -1,0 +1,211 @@
+---
+title: Human Activity Pattern Recognition and Quality prediction with Random Forest
+  Algorithm
+author: "Abiyu Giday"
+date: "November 22, 2015"
+output:
+  html_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+  word_document: default
+---
+
+#Motivation:
+<img src="https://pupillageandhowtogetit.files.wordpress.com/2013/04/jsw_measuring_quality_764.jpg" align="right" width="35%" height="35%" />
+
+When it comes to human physical activity, quantifying repetition of a particular exercise is easier than measuring quality or how well the exercise is performed. Paying attention to both frequency and quality will result in optimal outcome.  However, measuring quality of physical activity is a subtle but important aspect that differs from one individual to the other.  Here we will discuss how Machine Learning (ML) algorithm model is utilized to recognize exercise patterns and predict the quality in which the exercise is performed.  The preclassified training dataset is used to generate a machine learning  model.  The dataset contains data on six volunteers that performed a dumbbell weight lifting exercise with 5 levels of quality ranges (labled A-E in the trianing data set - not labled on test dataset).  The specifics of the exercise is detailed in the next section labled 'The Experiment'.  Few ML algorithms were considered before selecting the Random Forest (RF) algorithm which resulted in 98% level of accuracy. 
+
+[CaretPackage](http://topepo.github.io/caret/index.html) is used, to preprocess, train and tune the model on the human [activity recognition dataset](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv).  Principal Component Analysis (PCA) function was used in the preprocessing stage to separate the signal from the noise and select optimal features based on finding new set of multivariate variables that represent as much of the variability.  As we will see, PCA needed 25 features (out of 53) to capture 95% of the variance.  Because the row dataset contains 19,622 observations and 160 features, a fairly large data size for personal computers single core processor, the [‘doMC’ package](https://cran.r-project.org/web/packages/doMC/doMC.pdf) was used to make 8 core processors available to digest the data in parallel, cutting down the amount of time it took to train the Random Forest algorithm from 3+ hours to less than 10 minutes. 
+
+This document is follows redproducible research principles in which the markdown file download the the data directly from the source, tidy the data, run random forest algorithm and plot the figures dynamically.
+
+
+#The Experiment:
+Here is an excerpt from the paper written to describe the experiment:
+
+"_This human activity recognition research has traditionally focused on discriminating between different activities, i.e. to predict "which" activity was performed at a specific point in time (like with the Daily Living Activities dataset above). The approach we propose for the Weight Lifting Exercises dataset is to investigate "how (well)" an activity was performed by the wearer. The "how (well)" investigation has only received little attention so far, even though it potentially provides useful information for a large variety of applications,such as sports training._  
+
+_In this work (see the paper) we first define quality of execution and investigate three aspects that pertain to qualitative activity recognition: the problem of specifying correct execution, the automatic and robust detection of execution mistakes, and how to provide feedback on the quality of execution to the user. We tried out an on-body sensing approach (dataset here), but also an "ambient sensing approach" (by using Microsoft Kinect - dataset still unavailable)_
+
+_Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E)._"
+
+
+#Machine Learning Steps
+The following steps detail the data collection and exploration, followed by how  parallel computing and how it was configured and used to minimize the amount to time it took to process the dataset. We then discuss the steps to train, tune  and evaluate the dataset.
+
+##Data Collection:
+The data was collected and made avilable.  Here we first load the reqruied libraries to process the data and download the dataset for training and testing from . There are two datasets. One for [training](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) the the other for [testing](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv). are all of 160 features in the original data set.  
+```{r SetEnv, eval=TRUE, echo=FALSE, message=FALSE, cache = TRUE}
+setwd("~/Documents/Data-Science/DataScienceSpecialization/MachineLearning/gitdip/MachineLearning")
+```
+
+```{r loadlib, eval=TRUE, echo=TRUE, message=FALSE, cache = TRUE}
+library(dplyr)
+library(caret)
+library(randomForest)
+library(rattle)
+library(pROC)
+library(foreach)
+library(doMC)
+registerDoMC(cores = 8)
+
+
+#Download training data 
+if(!file.exists("./data")){dir.create("./data")}
+fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(fileUrl, destfile = "./data/pml-training.csv", method = "curl")
+
+trainData <- read.csv("./data/pml-training.csv")
+
+#Structure of the dataset
+#str(trainData)
+#names(trainData)
+
+#Download test data 
+if(!file.exists("./data")){dir.create("./data")}
+fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(fileUrl, destfile = "./data/pml-testing.csv", method = "curl")
+
+testData <- read.csv("./data/pml-testing.csv")
+
+```
+
+Here are all of the features in the dataset. Notice the quality measurment for each person is listed in the _classe_ feature of the training dataset. 
+```{r features, eval=TRUE, echo=TRUE, message=FALSE, cache = TRUE}
+names(trainData)
+```
+##Data Exploration:
+In the following steps we will tidy the data with dplyr package. Variables not used as measurment and contain only missing values are removed resulting in just 53 features out of 160.
+```{r dataexplor,eval=TRUE, message=FALSE, echo=TRUE }
+#Remove variables that contain only NA
+library(dplyr)
+df1 <- trainData
+df2 <- df1 %>% select(-matches("^kurtosis|^skewness|^max|^min|^amplitude|^var|^stddev|^avg"))
+
+#Remove variables that do not measure performance & reorder data table with classe feature appearing on column 1
+df3 <- df2[,-c(1:7)] 
+df3 <- df3[, c(53,1:52)]  
+
+# Structur of the new dataset
+str(df3)
+
+#Verify if missing values are in the dataset
+sum(is.na(df2))
+```
+
+##Parallel Computing:
+Here we set the number of cores for parallel computing to 8. This is enabled with the 'doMC' packages and setting the cores to 8( eight because the mahcine used have 8 cores available to it.) . Being able to parallely train the data cut the amount of time significantly.  
+```{r parallel,eval=TRUE, message=FALSE, echo=TRUE}
+#Register the number of cores to be used.
+library(doMC)
+registerDoMC(cores = 8)
+
+```
+
+##Spliting the data into training and validation:
+The training data is split using the createDataParition function from the caret package. The split was 75/25. 75% is set aside to train the model,  and 25% was set aside to validate the trained model.   
+```{r split,eval=TRUE, echo=TRUE }
+library(caret)
+#Split the training data into training and validation
+set.seed(1582)
+inTrain <- createDataPartition(y = df3$classe, p = 0.75, list = FALSE)
+train22 <- df3[inTrain,]
+valdt22 <- df3[-inTrain,]
+
+#check if missing value exist
+dim(train22)
+sum(is.na(train22))
+dim(valdt22)
+sum(is.na(valdt22))
+
+#PreProcessing
+```
+
+##Tuning and training the Model
+On personal computer's (PC), it takes fairly long time to train the data with 20 thousand observation, especially when  number of folds or number of resampling iteration is set to higher number. On this case number of resmpling is left to a default (10 repeat is commented out in the configuration because even with 8 cores, 10 repetion took over three hours to process).  To train the model, Random Forest (rf) machine learning algorithm is used, and Principal Component Analysis (PCA) is turned on for preprocessing, centering and scaling of the data is also excplicityly set to scale and center the data during preprocessing stage. The _system.time_ function is configured to measure the proceesing duration.
+```{r train,eval=TRUE, echo=TRUE, cache = TRUE}
+
+fitControl <- trainControl( 
+        method = "repeatedcv",
+        #number = 10,
+        #repeats = 10,
+        allowParallel = TRUE)
+
+set.seed(222)
+system.time(modFit1 <- train(classe ~.,
+                             data = train22,
+                             method = "rf",
+                             preProcess=c("pca","center","scale"),
+                             trControl=fitControl))
+
+```
+###Plots for the model
+The following set of plots show Model vs Accuracy and Accuracy and kappa normal curves respectively.
+```{r modelplot,eval=TRUE, echo=TRUE }
+plot(modFit1)
+resampleHist(modFit1) #
+```
+
+###Variable Importance
+Of the 53 variables used in the training data, preprocessing with PCA identfied **25 predictors that can explain 95%** of the variance.  The follwoing steps reveal important features. 
+
+```{r varimp,eval=TRUE, echo=TRUE }
+modFit1$preProcess
+varImp(modFit1)
+```
+
+####Variable importance plot
+```{r varplot, eval=TRUE, echo=TRUE, fig.width = 8, fig.height = 4, fig.align='center',fig.cap = "Var Importance Plot" }
+plot(varImp(modFit1))
+```
+
+####Scatter plot for selected important variables 
+
+The scatter plot uses the top 4 variables and their relations to each person that participated in the experiment. 
+```{r matrixplt, fig.margin = TRUE, fig.width = 8, fig.height = 8, fig.align='center',fig.cap = "Scatterplot Matrix with Ellipses"}
+# Scatterplot Matrix with Ellipses
+featurePlot(x = df2[, c(8,10,20,45)],
+            y = df2$user_name,
+            plot = "ellipse",
+            ## Add a key at the top
+            auto.key = list(columns = 3))
+```
+
+#Model Evaluation:
+To evaluate the models the _confustionMatrix_ function is used on the valdation dataset. And it shows about 98% accuracy and 0.97% error rate. P value is  2.2e-16 < 0.05 which is acceptable significant. With the 95% confidence interval within the range of (0.9719, 0.9806). Sensetivity and specificity for the model are in the ranges of 94-99% for all 5 qualities (A-E) that are predicted by the moedl. The Kappy value is  97%, combined with all the other indicators, lead to a very high accuracy predition. 
+```{r modeval,eval=TRUE, echo=TRUE }
+modFit1$finalModel
+confusionMatrix(valdt22$classe,predict(modFit1,valdt22))
+
+# area under the ROC curve for each predictor 
+RocImportance <- filterVarImp(x=train22[,-ncol(train22)], y = train22$classe)
+head(RocImportance)
+plot(RocImportance)
+
+
+#Testing the model against the testData
+data.frame(TestData = testData$user_name, Predicted = predict(modFit1, testData))
+
+```
+
+#Take Away:
+The objective of this exercise had been to create a model that will accurately recognize patterns and predict the manner (quality) in which the participants of the experiment exercised from the collected dataset.  Utilizing the Random Forest algorithm, a model was generated with Caret packages function, and preprocessed with PCA to select optimal number of high valued variables resulting in a a very high level of  pattern recognition and accuracy.
+
+
+
+#Reference
+
+_Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements Read more: http://groupware.les.inf.puc-rio.br/har#ixzz3sEPIq2gc_
+
+_Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. Read more: http://groupware.les.inf.puc-rio.br/har#wle_paper_section#ixzz3sGJpMNZm_
+
+_Max Kuhn. PhD Pfizer Global R&D, http://topepo.github.io/caret/index.html_
+
+_Jeff Leek, PhD - Practical Machine Learning lectures. https://www.coursera.org/course/predmachlearn_  
+
+_Wikepedia: https://en.wikipedia.org/wiki/Machine_learning_
+
+_StackOverflow: http://stackoverflow.com/_
+
+
